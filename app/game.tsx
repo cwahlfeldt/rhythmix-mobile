@@ -1,18 +1,20 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { View, StyleSheet, Dimensions, Pressable, Modal, Platform } from 'react-native';
+import { View, StyleSheet, Dimensions, Pressable, Modal, ActivityIndicator } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ThemedText } from '../components/ThemedText';
-import { NoteBlock } from '../components/game/NoteBlock';
-import { BeatLine, calculateScore, SCORE_ZONES } from '../components/game/BeatLine';
+import { BeatLine } from '../components/game/BeatLine';
 import { ScoreDisplay } from '../components/game/ScoreDisplay';
 import { FallingNotes } from '../components/game/FallingNotes';
+import { CountdownOverlay } from '../components/game/CountdownOverlay';
+import { calculateScore, calculateNoteTiming } from '../utils/scoring';
 import type { SongResponse, Note } from '../types/song';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 const NUMBER_OF_LANES = 3;
 const LANE_WIDTH = Dimensions.get('window').width / NUMBER_OF_LANES;
+const AUDIO_WARMUP_DURATION = 3000; // 3 seconds of warmup
 
 export default function GameScreen() {
     const params = useLocalSearchParams();
@@ -26,33 +28,69 @@ export default function GameScreen() {
     const [combo, setCombo] = useState(0);
     const [lastRating, setLastRating] = useState<string>();
     const [activeNotes, setActiveNotes] = useState<Note[]>([]);
+    const [showCountdown, setShowCountdown] = useState(false);
+    const [loadingStatus, setLoadingStatus] = useState('Preparing audio...');
 
     const soundRef = useRef<Audio.Sound>();
+    const warmupSoundRef = useRef<Audio.Sound>();
     const gameStartTimeRef = useRef<number>(0);
     const currentTimeRef = useRef<number>(0);
 
     useEffect(() => {
         setupGame();
         return () => {
-            if (soundRef.current) {
-                soundRef.current.unloadAsync();
-            }
+            cleanupAudio();
         };
     }, []);
 
+    const cleanupAudio = async () => {
+        if (soundRef.current) {
+            await soundRef.current.unloadAsync();
+        }
+        if (warmupSoundRef.current) {
+            await warmupSoundRef.current.unloadAsync();
+        }
+    };
+
     const setupGame = async () => {
         try {
-            // Set up audio
+            setLoadingStatus('Setting up audio...');
             await Audio.setAudioModeAsync({
                 playsInSilentModeIOS: true,
                 staysActiveInBackground: true,
+                shouldDuckAndroid: false,
             });
 
-            // Load the song from local MP3 file
-            let soundObject;
+            // Load and play a short sound at low volume to initialize audio system
+            setLoadingStatus('Initializing audio system...');
             try {
-                console.log('Loading local MP3 file...');
-                soundObject = await Audio.Sound.createAsync(
+                const { sound } = await Audio.Sound.createAsync(
+                    require('../assets/test_song.mp3'),
+                    {
+                        shouldPlay: true,
+                        volume: 0.01,
+                        positionMillis: 0,
+                        progressUpdateIntervalMillis: 50
+                    }
+                );
+                warmupSoundRef.current = sound;
+
+                // Stop after 100ms
+                await new Promise(resolve => setTimeout(async () => {
+                    await sound.stopAsync();
+                    await sound.unloadAsync();
+                    warmupSoundRef.current = undefined;
+                    resolve(true);
+                }, 100));
+            } catch (e) {
+                console.warn('Warmup audio failed, continuing anyway:', e);
+            }
+
+            // Load the actual song
+            setLoadingStatus('Loading song...');
+            let songSound;
+            try {
+                songSound = await Audio.Sound.createAsync(
                     require('../assets/test_song.mp3'),
                     { shouldPlay: false }
                 );
@@ -61,109 +99,60 @@ export default function GameScreen() {
                 throw new Error(`Failed to load audio: ${e?.message || 'Unknown error'}`);
             }
 
-            const { sound } = soundObject;
-            soundRef.current = sound;
+            soundRef.current = songSound.sound;
+
+            // Wait for audio system to fully initialize
+            setLoadingStatus('Connecting audio devices...');
+            await new Promise(resolve => setTimeout(resolve, AUDIO_WARMUP_DURATION));
 
             setIsLoading(false);
-            startCountIn();
+            setShowCountdown(true);
         } catch (error) {
             console.error('Error setting up game:', error);
             router.back();
         }
     };
 
-    const startCountIn = async () => {
-        // 4-count based on BPM
-        const beatDuration = 60000 / songData.data.metadata.bpm;
-        let count = 4;
-
-        // Function to handle each beat
-        const handleBeat = async () => {
-            if (count > 0) {
-                count--;
-                if (count === 0) {
-                    // Start game immediately on the 5th beat
-                    startGame();
-                }
-            }
-        };
-
-        // Start the count-in with precise timing
-        const beatTimer = () => {
-            handleBeat();
-            if (count > 0) {
-                setTimeout(beatTimer, beatDuration);
-            }
-        };
-
-        beatTimer();
-    };
-
-    const startGame = async () => {
-        // Start immediately on the 5th beat (after 4-count)
-        const beatDuration = 60000 / songData.data.metadata.bpm;
+    const handleCountdownComplete = async () => {
+        setShowCountdown(false);
         const now = Date.now();
-
-        // Set game start time to now
         gameStartTimeRef.current = now;
         setActiveNotes(songData.data.notes);
-
-        // Start the song immediately
         await soundRef.current?.playAsync();
     };
 
     const handleTap = async (lane: number) => {
         if (isPaused || isGameOver) return;
 
-        const beatLineY = SCREEN_HEIGHT - 150; // Same position as defined in BeatLine
-        const hitWindow = 30; // Pixels of leeway for visual alignment
-
-        // Find notes in this lane that are at the beat line
         const notesInLane = activeNotes.filter(note => note.lane === lane);
+        if (notesInLane.length === 0) return;
 
-        // Get the note closest to the beat line if multiple are in range
+        const currentTime = Date.now();
+
         const nearestNote = notesInLane.reduce((nearest, note) => {
             if (!nearest) return note;
-            const currentDiff = Math.abs(note.position!.value - beatLineY);
-            const nearestDiff = Math.abs(nearest.position!.value - beatLineY);
+            const currentDiff = Math.abs(calculateNoteTiming(note.timestamp, gameStartTimeRef.current, currentTime));
+            const nearestDiff = Math.abs(calculateNoteTiming(nearest.timestamp, gameStartTimeRef.current, currentTime));
             return currentDiff < nearestDiff ? note : nearest;
         }, null as Note | null);
 
-        console.log(notesInLane[0].timestamp);
-
         if (nearestNote) {
-            // Perfect hit since we're checking position
-            setScore(prev => prev + 1000);
-            setCombo(prev => prev + 1);
-            setLastRating('PERFECT');
+            const timingDiff = calculateNoteTiming(nearestNote.timestamp, gameStartTimeRef.current, currentTime);
+            const { points, rating } = calculateScore(timingDiff);
 
-            // Remove the hit note
-            setActiveNotes(prev => prev.filter(n => n !== nearestNote));
+            if (rating !== 'MISS') {
+                setScore(prev => prev + points);
+                setCombo(prev => prev + 1);
+                setLastRating(rating);
+                setActiveNotes(prev => prev.filter(n => n !== nearestNote));
+            }
         }
     };
 
     const handleNoteOffscreen = (note: Note) => {
-        console.log(activeNotes.length)
-        setActiveNotes(activeNotes.slice(0));
+        setActiveNotes(prev => prev.filter(n => n !== note));
         setCombo(0);
         setLastRating('MISS');
-        setScore(prev => Math.max(0, prev - 500)); // Decrease score by 500 points, but don't go below 0
-    };
-
-    const endGame = async () => {
-        // Stop the song
-        await soundRef.current?.stopAsync();
-
-        // Save high score if beaten
-        if (score > previousHighScore) {
-            const highScores = JSON.parse(
-                await AsyncStorage.getItem('highScores') || '{}'
-            );
-            highScores[songData.data.metadata.name] = score;
-            await AsyncStorage.setItem('highScores', JSON.stringify(highScores));
-        }
-
-        setIsGameOver(true);
     };
 
     const handlePause = async () => {
@@ -175,42 +164,37 @@ export default function GameScreen() {
         await soundRef.current?.pauseAsync();
     };
 
-    const handleResume = async () => {
-        // Calculate the next beat time based on current BPM
+    const handleResume = () => {
+        setShowCountdown(true);
+    };
+
+    const handleResumeAfterCountdown = async () => {
         const beatDuration = 60000 / songData.data.metadata.bpm;
         const now = Date.now();
-        const nextBeatTime = now + (beatDuration - (now % beatDuration));
+        const currentPosition = currentTimeRef.current * 1000;
 
-        // Update game start time to maintain sync with notes
-        const currentPosition = currentTimeRef.current * 1000; // Convert to milliseconds
-        gameStartTimeRef.current = nextBeatTime - currentPosition;
-
-        // Wait until the next beat to resume
-        const waitTime = nextBeatTime - now;
-        await new Promise(resolve => setTimeout(resolve, waitTime));
+        gameStartTimeRef.current = now - currentPosition;
 
         setIsPaused(false);
         await soundRef.current?.playFromPositionAsync(currentPosition);
     };
 
     const handleQuit = async () => {
-        if (soundRef.current) {
-            await soundRef.current.unloadAsync();
-        }
+        await cleanupAudio();
         router.back();
     };
 
     if (isLoading) {
         return (
-            <View style={styles.container}>
-                <ThemedText>Loading...</ThemedText>
+            <View style={styles.loadingContainer}>
+                <ActivityIndicator size="large" color="#fff" style={styles.loadingSpinner} />
+                <ThemedText style={styles.loadingText}>{loadingStatus}</ThemedText>
             </View>
         );
     }
 
     return (
         <View style={styles.container}>
-            {/* Header */}
             <View style={styles.header}>
                 <ThemedText style={styles.songName}>{songData.data.metadata.name}</ThemedText>
                 <Pressable onPress={handlePause} style={styles.pauseButton}>
@@ -218,21 +202,18 @@ export default function GameScreen() {
                 </Pressable>
             </View>
 
-            {/* Score Display */}
             <ScoreDisplay
                 score={score}
                 lastRating={lastRating}
                 combo={combo}
             />
 
-            {/* Game Area */}
             <View style={styles.gameArea}>
                 <BeatLine
                     laneWidth={LANE_WIDTH}
                     numberOfLanes={NUMBER_OF_LANES}
                 />
 
-                {/* Falling Notes */}
                 <FallingNotes
                     notes={activeNotes}
                     laneWidth={LANE_WIDTH}
@@ -243,7 +224,6 @@ export default function GameScreen() {
                     bpm={songData.data.metadata.bpm}
                 />
 
-                {/* Lane Touch Areas */}
                 <View style={styles.laneContainer}>
                     {Array.from({ length: NUMBER_OF_LANES }).map((_, index) => (
                         <Pressable
@@ -253,11 +233,16 @@ export default function GameScreen() {
                         />
                     ))}
                 </View>
+
+                <CountdownOverlay
+                    isVisible={showCountdown}
+                    onComplete={isPaused ? handleResumeAfterCountdown : handleCountdownComplete}
+                    bpm={songData.data.metadata.bpm}
+                />
             </View>
 
-            {/* Pause Modal */}
             <Modal
-                visible={isPaused && !isGameOver}
+                visible={isPaused && !isGameOver && !showCountdown}
                 transparent
                 animationType="fade"
             >
@@ -274,7 +259,6 @@ export default function GameScreen() {
                 </View>
             </Modal>
 
-            {/* Game Over Modal */}
             <Modal
                 visible={isGameOver}
                 transparent
@@ -306,6 +290,19 @@ const styles = StyleSheet.create({
         flex: 1,
         backgroundColor: '#000',
     },
+    loadingContainer: {
+        flex: 1,
+        backgroundColor: '#000',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    loadingSpinner: {
+        marginBottom: 20,
+    },
+    loadingText: {
+        fontSize: 18,
+        textAlign: 'center',
+    },
     header: {
         flexDirection: 'row',
         justifyContent: 'space-between',
@@ -332,7 +329,7 @@ const styles = StyleSheet.create({
         right: 0,
         bottom: 0,
         flexDirection: 'row',
-        zIndex: 10, // Ensure it's above other elements for tapping
+        zIndex: 10,
     },
     lane: {
         flex: 1,

@@ -1,12 +1,12 @@
-import React, { useEffect } from 'react';
-import { View, StyleSheet, Dimensions } from 'react-native';
+import React from 'react';
+import { View, StyleSheet } from 'react-native';
 import Animated, {
     useAnimatedStyle,
     withTiming,
     useSharedValue,
-    withSequence,
     runOnJS,
     Easing,
+    cancelAnimation,
 } from 'react-native-reanimated';
 import type { Note } from '../../types/song';
 import { NoteBlock } from './NoteBlock';
@@ -18,20 +18,21 @@ interface FallingNotesProps {
     scrollSpeed: number;
     gameStartTime: number;
     onNoteOffscreen: (note: Note) => void;
-    isPaused?: boolean;
+    isPaused: boolean;
     bpm: number;
 }
 
 export function FallingNotes({
     notes,
     laneWidth,
-    scrollSpeed,
     gameStartTime,
     onNoteOffscreen,
-    isPaused = false,
+    isPaused,
     bpm,
 }: FallingNotesProps) {
-    const screenHeight = Dimensions.get('window').height;
+    const pausedPositions = React.useRef(new Map<string, number>());
+    const pauseStartTime = React.useRef<number>(0);
+    const totalPauseDuration = React.useRef<number>(0);
 
     return (
         <View style={StyleSheet.absoluteFill}>
@@ -40,12 +41,13 @@ export function FallingNotes({
                     key={`${note.timestamp}-${note.lane}`}
                     note={note}
                     laneWidth={laneWidth}
-                    scrollSpeed={scrollSpeed}
                     gameStartTime={gameStartTime}
-                    screenHeight={screenHeight}
                     onOffscreen={onNoteOffscreen}
                     isPaused={isPaused}
                     bpm={bpm}
+                    pausedPositions={pausedPositions.current}
+                    pauseStartTime={pauseStartTime}
+                    totalPauseDuration={totalPauseDuration}
                 />
             ))}
         </View>
@@ -55,92 +57,111 @@ export function FallingNotes({
 interface AnimatedNoteProps {
     note: Note;
     laneWidth: number;
-    scrollSpeed: number;
     gameStartTime: number;
-    screenHeight: number;
     onOffscreen: (note: Note) => void;
-    isPaused?: boolean;
+    isPaused: boolean;
     bpm: number;
+    pausedPositions: Map<string, number>;
+    pauseStartTime: React.MutableRefObject<number>;
+    totalPauseDuration: React.MutableRefObject<number>;
 }
 
 function AnimatedNote({
     note,
     laneWidth,
-    scrollSpeed,
     gameStartTime,
-    screenHeight,
     onOffscreen,
-    isPaused = false,
+    isPaused,
     bpm,
+    pausedPositions,
+    pauseStartTime,
+    totalPauseDuration,
 }: AnimatedNoteProps) {
-    const startY = -150; // Start position above screen
-    const beatLineY = screenHeight - 150; // Beat line position
-    const translateY = useSharedValue(startY);
+    const translateY = useSharedValue(-NOTE_HEIGHT);
+    const noteKey = `${note.timestamp}-${note.lane}`;
+    const animationStarted = React.useRef(false);
 
-    // Set initial position on note object
-    useEffect(() => {
+    // Set initial position on note object for hit detection
+    React.useEffect(() => {
         note.position = translateY;
     }, []);
 
-    useEffect(() => {
-        // Don't start animation if game hasn't started yet
-        if (Date.now() < gameStartTime) {
-            return;
-        }
-
-        // Calculate when this note should hit the beat line center
-        const noteTimeMs = note.timestamp * 1000; // Convert to milliseconds
-        const currentTimeMs = Date.now() - gameStartTime;
-        const timeToHitMs = noteTimeMs - currentTimeMs;
-
-        // Calculate fall duration based on visual preference (6 beats to reach line)
-        const beatsToReachLine = 24;
-        const fallDurationMs = (NOTE_HEIGHT * 60 / (bpm)) * 1000;
-
-        // Precise center offset calculation
-        const centerOffsetMs = (NOTE_HEIGHT / 2) / (beatLineY - startY) * fallDurationMs;
-        const delayMs = timeToHitMs - fallDurationMs + centerOffsetMs;
-
-        if (delayMs < 0) return;
-
-        let animationFrameId: number;
-        let startTime: number;
-
-        if (!isPaused) {
-            const animate = (timestamp: number) => {
-                if (!startTime) startTime = timestamp;
-                const elapsed = timestamp - startTime;
-
-                if (elapsed >= delayMs) {
-                    translateY.value = withSequence(
-                        withTiming(startY, { duration: 0 }),
-                        withTiming(beatLineY, {
-                            duration: fallDurationMs,
-                            easing: Easing.linear,
-                        }),
-                        withTiming(screenHeight, {
-                            duration: fallDurationMs / 2,
-                            easing: Easing.linear,
-                        }, (finished) => {
-                            if (finished) {
-                                runOnJS(onOffscreen)(note);
-                            }
-                        })
-                    );
-                } else {
-                    animationFrameId = requestAnimationFrame(animate);
-                }
-            };
-
-            animationFrameId = requestAnimationFrame(animate);
-        }
-
-        return () => {
-            if (animationFrameId) {
-                cancelAnimationFrame(animationFrameId);
+    React.useEffect(() => {
+        if (isPaused) {
+            if (!pauseStartTime.current) {
+                pauseStartTime.current = Date.now();
             }
-        };
-    }, [note, scrollSpeed, gameStartTime, isPaused]);
+            pausedPositions.set(noteKey, translateY.value);
+            cancelAnimation(translateY);
+            return;
+        } else if (pauseStartTime.current) {
+            // Update total pause duration when resuming
+            totalPauseDuration.current += Date.now() - pauseStartTime.current;
+            pauseStartTime.current = 0;
+        }
+
+        // Calculate timing including pause compensation
+        const effectiveGameTime = Date.now() - gameStartTime - totalPauseDuration.current;
+        const noteTimeMs = note.timestamp * 1000;
+        const timeToStart = noteTimeMs - effectiveGameTime;
+
+        // Calculate animation parameters
+        const beatDurationMs = (60 / bpm) * 1000;
+        const fallDuration = beatDurationMs * 4; // Time to fall full distance
+
+        // If note hasn't started falling yet and isn't scheduled
+        if (!animationStarted.current && timeToStart > 0) {
+            setTimeout(() => {
+                if (!isPaused) {
+                    translateY.value = withTiming(800, {
+                        duration: fallDuration,
+                        easing: Easing.linear,
+                    }, (finished) => {
+                        if (finished) {
+                            runOnJS(onOffscreen)(note);
+                        }
+                    });
+                }
+            }, timeToStart);
+            animationStarted.current = true;
+        }
+        // If note was paused, resume from paused position
+        else if (pausedPositions.has(noteKey)) {
+            const currentPos = pausedPositions.get(noteKey)!;
+            const remainingDistance = 800 - currentPos;
+            const remainingDuration = (remainingDistance / (800 + NOTE_HEIGHT)) * fallDuration;
+
+            translateY.value = currentPos;
+            translateY.value = withTiming(800, {
+                duration: remainingDuration,
+                easing: Easing.linear,
+            }, (finished) => {
+                if (finished) {
+                    runOnJS(onOffscreen)(note);
+                }
+            });
+            pausedPositions.delete(noteKey);
+        }
+        // If note should already be falling (negative timeToStart)
+        else if (!animationStarted.current && timeToStart <= 0) {
+            const elapsedTime = -timeToStart;
+            const progress = elapsedTime / fallDuration;
+            const startPosition = -NOTE_HEIGHT + progress * (800 + NOTE_HEIGHT);
+            const remainingDuration = fallDuration * (1 - progress);
+
+            translateY.value = startPosition;
+            translateY.value = withTiming(800, {
+                duration: remainingDuration,
+                easing: Easing.linear,
+            }, (finished) => {
+                if (finished) {
+                    runOnJS(onOffscreen)(note);
+                }
+            });
+            animationStarted.current = true;
+        }
+
+    }, [note, gameStartTime, isPaused, bpm]);
 
     const animatedStyle = useAnimatedStyle(() => ({
         transform: [{ translateY: translateY.value }],
