@@ -4,7 +4,7 @@ import { ThemedText } from '../ThemedText';
 
 interface ScoreDisplayProps {
     score: number;
-    lastRating?: string;
+    lastRating: string | null;
     combo: number;
 }
 
@@ -33,7 +33,7 @@ export function ScoreDisplay({ score, lastRating, combo }: ScoreDisplayProps) {
         }
     }, [lastRating]);
 
-    const getRatingColor = (rating?: string) => {
+    const getRatingColor = (rating: string | null) => {
         switch (rating) {
             case 'PERFECT':
                 return '#FFD700'; // Gold

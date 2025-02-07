@@ -99,6 +99,46 @@ rhythmix-mobile/
 
 ## Development
 
+data schema that is used to create the gameplay.
+
+```json
+{
+  "_object_with_fields": {
+    "success": "boolean",
+    "data": {
+      "_object_with_fields": {
+        "metadata": {
+          "_object_with_fields": {
+            "bpm": "number",
+            "difficulty": "number",
+            "duration": "number",
+            "name": "string",
+            "recommended_scroll_speed": "number"
+          }
+        },
+        "notes": {
+          "_array_of": [
+            {
+              "_object_with_fields": {
+                "intensity": "number",
+                "lane": "number",
+                "timestamp": "number",
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "sections": {
+          "_array_of": [
+            "empty"
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
 ### Adding New Songs
 
 Songs are defined using the following structure:
@@ -114,14 +154,6 @@ interface SongMetadata {
 ```
 
 Place song files in the `assets/` directory and update the song data accordingly.
-
-### Running Tests
-
-```bash
-npm test
-# or
-yarn test
-```
 
 ## License
 

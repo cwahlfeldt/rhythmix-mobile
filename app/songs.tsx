@@ -19,7 +19,7 @@ export default function SongsScreen() {
     const loadSongsAndScores = async () => {
         try {
             // Load test song
-            setSongs([testSong as SongResponse]);
+            setSongs([testSong as unknown as SongResponse]);
 
             // Load high scores
             const scores = await AsyncStorage.getItem('highScores');

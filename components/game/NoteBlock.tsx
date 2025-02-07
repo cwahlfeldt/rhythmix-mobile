@@ -2,9 +2,8 @@ import React from 'react';
 import { StyleSheet } from 'react-native';
 import Animated, { SharedValue } from 'react-native-reanimated';
 import type { Note } from '../../types/song';
-import { NOTE_HEIGHT } from '@/constants/Global';
+import { NOTE_HEIGHT } from '../../constants/Global';
 
-// Predefined colors for better performance and consistency
 const LANE_COLORS = [
     '#FF3366', // Red
     '#33FF66', // Green
@@ -17,7 +16,15 @@ interface NoteBlockProps {
     laneWidth: number;
 }
 
-export function NoteBlock({ note, laneWidth }: NoteBlockProps) {
+export const NoteBlock = React.memo(({ note, position, laneWidth }: NoteBlockProps) => {
+    // Store position reference for hit detection
+    React.useEffect(() => {
+        note.position = position;
+        return () => {
+            delete note.position;
+        };
+    }, [note, position]);
+
     const noteWidth = laneWidth * 0.8; // 80% of lane width
     const xPosition = note.lane * laneWidth + (laneWidth * 0.1); // Center in lane
 
@@ -33,7 +40,9 @@ export function NoteBlock({ note, laneWidth }: NoteBlockProps) {
             ]}
         />
     );
-}
+});
+
+NoteBlock.displayName = 'NoteBlock';
 
 const styles = StyleSheet.create({
     noteBlock: {

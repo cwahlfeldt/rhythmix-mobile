@@ -1,38 +1,28 @@
-import { SharedValue } from 'react-native-reanimated';
+import { SCORE_ZONES, SCORE_POINTS } from '../constants/Global';
 
-export interface TimingScore {
+export type ScoreRating = keyof typeof SCORE_POINTS;
+
+export interface ScoreResult {
     points: number;
-    rating: 'PERFECT' | 'GOOD' | 'OK' | 'MISS';
+    rating: ScoreRating;
 }
 
-// Simplified scoring zones (in milliseconds)
-const TIMING_THRESHOLDS = {
-    PERFECT: 50,  // ±50ms
-    GOOD: 100,    // ±100ms
-    OK: 150,      // ±150ms
-} as const;
-
-// Simplified points system
-const POINTS = {
-    PERFECT: 1000,
-    GOOD: 500,
-    OK: 100,
-    MISS: 0,
-} as const;
-
-export function calculateScore(timingDifference: number): TimingScore {
+export function calculateScore(timingDifference: number): ScoreResult {
     const absDiff = Math.abs(timingDifference);
 
-    if (absDiff <= TIMING_THRESHOLDS.PERFECT) {
-        return { points: POINTS.PERFECT, rating: 'PERFECT' };
+    if (absDiff <= SCORE_ZONES.PERFECT) {
+        return { points: SCORE_POINTS.PERFECT, rating: 'PERFECT' };
     }
-    if (absDiff <= TIMING_THRESHOLDS.GOOD) {
-        return { points: POINTS.GOOD, rating: 'GOOD' };
+    if (absDiff <= SCORE_ZONES.GOOD) {
+        return { points: SCORE_POINTS.GOOD, rating: 'GOOD' };
     }
-    if (absDiff <= TIMING_THRESHOLDS.OK) {
-        return { points: POINTS.OK, rating: 'OK' };
+    if (absDiff <= SCORE_ZONES.MID) {
+        return { points: SCORE_POINTS.MID, rating: 'MID' };
     }
-    return { points: POINTS.MISS, rating: 'MISS' };
+    if (absDiff <= SCORE_ZONES.BAD) {
+        return { points: SCORE_POINTS.BAD, rating: 'BAD' };
+    }
+    return { points: SCORE_POINTS.MISS, rating: 'MISS' };
 }
 
 // Helper to calculate note timing
